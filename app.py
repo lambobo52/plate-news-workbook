@@ -5,22 +5,20 @@ from datetime import datetime, timedelta
 import random
 
 # ---------- 配置 ----------
-# 板块列表（可根据需要增删，建议10-20个）
 PLATES = [
     "GPU", "光模块", "有色", "贵金属", "人型机器人",
     "宏观", "AI", "半导体", "新能源", "消费电子",
     "医药", "金融"
 ]
-NOTES_COL = "备注"          # 备注列名
-RECENT_DAYS = 10            # 表格显示最近10天
+NOTES_COL = "备注"
+RECENT_DAYS = 10            # 显示最近10天
 
-# ---------- 模拟新闻生成（可替换为真实抓取函数） ----------
+# ---------- 模拟新闻生成（带链接） ----------
 def fetch_mock_news(plate, date):
     """
-    模拟抓取：根据板块返回最多5条新闻，每条新闻占一行。
-    实际使用时，可替换为调用新闻API或爬虫的代码。
+    返回最多5条新闻，每条新闻后附带一个模拟链接（纯文本形式）。
+    实际使用时，可替换为真实API，将链接拼接在新闻后。
     """
-    # 各板块的新闻池（示例）
     news_pool = {
         "GPU": [
             "NVIDIA发布新一代AI芯片B200",
@@ -109,17 +107,21 @@ def fetch_mock_news(plate, date):
     }
     default_news = ["板块暂无重要新闻", "市场关注度一般", "行业动态平淡"]
     pool = news_pool.get(plate, default_news)
-    # 随机选取最多5条（不设固定种子，使每次刷新可能变化，模拟实时更新）
+    # 随机选取最多5条
     k = min(5, len(pool))
     selected = random.sample(pool, k)
-    return "\n".join(selected)
+    # 为每条新闻添加模拟链接（纯文本形式，方便复制）
+    # 格式：新闻标题 (http://example.com/news/123456)
+    linked_news = []
+    for news in selected:
+        fake_id = random.randint(100000, 999999)
+        linked_news.append(f"{news} (http://example.com/news/{fake_id})")
+    return "\n".join(linked_news)
 
 # ---------- 数据库操作 ----------
 def init_db():
-    """初始化数据库表"""
     conn = sqlite3.connect('daily_news.db')
     c = conn.cursor()
-    # 动态构建列：date, 板块1, 板块2, ..., 备注
     cols = ', '.join([f'"{plate}" TEXT' for plate in PLATES] + [f'"{NOTES_COL}" TEXT'])
     c.execute(f'CREATE TABLE IF NOT EXISTS daily_news (date TEXT PRIMARY KEY, {cols})')
     conn.commit()
@@ -129,43 +131,41 @@ def get_today_str():
     return datetime.now().strftime("%Y-%m-%d")
 
 def get_recent_dates(days=RECENT_DAYS):
-    """返回最近N天的日期字符串列表（含今天）"""
     today = datetime.now().date()
     return [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
 
-def load_data():
-    """从数据库加载最近RECENT_DAYS天的数据，返回DataFrame（索引为日期）"""
+def ensure_dates_exist(dates):
+    """确保指定日期列表中的每一天在数据库中都有记录（若无则插入）"""
     conn = sqlite3.connect('daily_news.db')
+    c = conn.cursor()
+    for date in dates:
+        c.execute('SELECT date FROM daily_news WHERE date = ?', (date,))
+        if c.fetchone() is None:
+            # 生成该日期的新闻
+            news_values = [fetch_mock_news(plate, date) for plate in PLATES]
+            notes = ""
+            cols = ','.join(['date'] + [f'"{plate}"' for plate in PLATES] + [f'"{NOTES_COL}"'])
+            placeholders = ','.join(['?'] * (len(PLATES) + 2))
+            c.execute(f'INSERT INTO daily_news ({cols}) VALUES ({placeholders})',
+                      (date, *news_values, notes))
+    conn.commit()
+    conn.close()
+
+def load_data():
+    """加载最近RECENT_DAYS天的数据，并确保都有记录"""
     dates = get_recent_dates()
-    placeholders = ','.join(['?'] * len(dates))
-    # 安全拼接列名（PLATES为固定列表）
+    ensure_dates_exist(dates)   # 自动填充缺失的历史日期
+    conn = sqlite3.connect('daily_news.db')
     cols = 'date, ' + ', '.join([f'"{plate}"' for plate in PLATES] + [f'"{NOTES_COL}"'])
-    query = f'SELECT {cols} FROM daily_news WHERE date IN ({placeholders}) ORDER BY date DESC'
+    query = f'SELECT {cols} FROM daily_news WHERE date IN ({",".join(["?"]*len(dates))}) ORDER BY date DESC'
     df = pd.read_sql_query(query, conn, params=dates, index_col='date')
     conn.close()
-    # 补全缺失日期（显示为全空行）
+    # 补全缺失日期（理论上不会缺失，但保险）
     df = df.reindex(dates)
     return df
 
-def update_today_if_missing():
-    """如果今天没有数据，则自动抓取新闻并插入"""
-    today = get_today_str()
-    conn = sqlite3.connect('daily_news.db')
-    c = conn.cursor()
-    c.execute('SELECT date FROM daily_news WHERE date = ?', (today,))
-    if c.fetchone() is None:
-        # 生成各板块新闻
-        news_values = [fetch_mock_news(plate, today) for plate in PLATES]
-        notes = ""  # 初始备注为空
-        cols = ','.join(['date'] + [f'"{plate}"' for plate in PLATES] + [f'"{NOTES_COL}"'])
-        placeholders = ','.join(['?'] * (len(PLATES) + 2))
-        c.execute(f'INSERT INTO daily_news ({cols}) VALUES ({placeholders})',
-                  (today, *news_values, notes))
-        conn.commit()
-    conn.close()
-
 def update_notes(edited_df):
-    """将用户编辑的备注列保存到数据库"""
+    """保存备注列"""
     conn = sqlite3.connect('daily_news.db')
     c = conn.cursor()
     for date, row in edited_df.iterrows():
@@ -176,22 +176,23 @@ def update_notes(edited_df):
     conn.commit()
     conn.close()
 
-def refresh_today_news():
-    """重新抓取今天的新闻（保留原有备注）"""
-    today = get_today_str()
-    # 生成新新闻
-    news_values = [fetch_mock_news(plate, today) for plate in PLATES]
+def refresh_all_recent_news():
+    """重新抓取最近RECENT_DAYS所有日期的新闻（保留备注）"""
+    dates = get_recent_dates()
     conn = sqlite3.connect('daily_news.db')
     c = conn.cursor()
-    # 获取当前备注（如果有）
-    c.execute(f'SELECT "{NOTES_COL}" FROM daily_news WHERE date = ?', (today,))
-    row = c.fetchone()
-    notes = row[0] if row else ""
-    # 使用 REPLACE 覆盖当天数据
-    cols = ','.join(['date'] + [f'"{plate}"' for plate in PLATES] + [f'"{NOTES_COL}"'])
-    placeholders = ','.join(['?'] * (len(PLATES) + 2))
-    c.execute(f'REPLACE INTO daily_news ({cols}) VALUES ({placeholders})',
-              (today, *news_values, notes))
+    for date in dates:
+        # 获取当前备注
+        c.execute(f'SELECT "{NOTES_COL}" FROM daily_news WHERE date = ?', (date,))
+        row = c.fetchone()
+        notes = row[0] if row else ""
+        # 生成新新闻
+        news_values = [fetch_mock_news(plate, date) for plate in PLATES]
+        # 使用 REPLACE 覆盖
+        cols = ','.join(['date'] + [f'"{plate}"' for plate in PLATES] + [f'"{NOTES_COL}"'])
+        placeholders = ','.join(['?'] * (len(PLATES) + 2))
+        c.execute(f'REPLACE INTO daily_news ({cols}) VALUES ({placeholders})',
+                  (date, *news_values, notes))
     conn.commit()
     conn.close()
 
@@ -199,53 +200,64 @@ def refresh_today_news():
 def main():
     st.set_page_config(page_title="板块财经新闻工作簿", layout="wide")
     st.title("📈 板块财经新闻工作簿")
-    st.caption("自动抓取每日板块新闻（最多5条），支持添加个人备注")
+    st.caption("自动填充每日板块新闻（最多5条），新闻末尾附带模拟链接（可复制）。支持添加个人备注。")
 
-    # 初始化数据库
+    # 初始化数据库并确保最近日期有数据
     init_db()
-    # 确保今天数据存在（自动填充）
-    update_today_if_missing()
+    # load_data内部已调用 ensure_dates_exist，但这里显式调用一次更稳妥
+    ensure_dates_exist(get_recent_dates())
 
-    # 加载初始数据到 session_state
+    # 加载数据
     if "df" not in st.session_state:
         st.session_state.df = load_data()
 
-    # 定义列配置（所有板块列只读，备注列可编辑）
+    # 定义列配置：所有板块列只读，备注列可编辑，设置宽度自适应
     column_config = {
         "date": st.column_config.TextColumn("日期", disabled=True, width="small")
     }
     for plate in PLATES:
         column_config[plate] = st.column_config.TextColumn(
-            plate, disabled=True, width="large", help="自动抓取的新闻（最多5条）"
+            plate,
+            disabled=True,
+            width="large",          # 给新闻列较大宽度
+            help="自动抓取的新闻（最多5条，含链接）",
+            wrap_text=True          # 允许换行
         )
     column_config[NOTES_COL] = st.column_config.TextColumn(
-        "备注", disabled=False, width="medium", help="输入您的观点（可换行）"
+        "备注",
+        disabled=False,
+        width="medium",
+        help="输入您的观点（可换行）",
+        wrap_text=True
     )
 
     # 显示数据编辑器
     edited_df = st.data_editor(
         st.session_state.df,
         column_config=column_config,
-        use_container_width=True,
-        num_rows="fixed",        # 禁止增删行
-        key="data_editor"
+        use_container_width=True,   # 表格占满容器宽度
+        num_rows="fixed",
+        key="data_editor",
+        height=600                  # 固定高度，出现滚动条
     )
 
-    # 操作按钮区域
-    col1, col2 = st.columns([1, 5])
+    # 操作按钮
+    col1, col2, col3 = st.columns([1, 1, 5])
     with col1:
         if st.button("💾 保存备注"):
             update_notes(edited_df)
-            st.session_state.df = load_data()   # 重载数据（确保显示最新）
-            st.rerun()
-    with col2:
-        if st.button("🔄 刷新今天新闻"):
-            refresh_today_news()
             st.session_state.df = load_data()
             st.rerun()
+    with col2:
+        if st.button("🔄 刷新历史新闻"):
+            refresh_all_recent_news()
+            st.session_state.df = load_data()
+            st.rerun()
+    with col3:
+        st.caption("刷新历史新闻将重新抓取最近10天所有新闻（保留备注），模拟链接会变化。")
 
-    # 显示最近更新提示
-    st.info(f"✅ 最近 {RECENT_DAYS} 天数据已加载。今日数据若不存在，系统已自动填充模拟新闻。")
+    # 提示信息
+    st.info(f"✅ 最近 {RECENT_DAYS} 天数据已自动填充。新闻后的 (链接) 为模拟出处，可复制。")
 
 if __name__ == "__main__":
     main()
