@@ -221,14 +221,14 @@ def main():
             disabled=True,
             width="large",          # 给新闻列较大宽度
             help="自动抓取的新闻（最多5条，含链接）",
-            wrap_text=True          # 允许换行
+           
         )
     column_config[NOTES_COL] = st.column_config.TextColumn(
         "备注",
         disabled=False,
         width="medium",
         help="输入您的观点（可换行）",
-        wrap_text=True
+     
     )
 
     # 显示数据编辑器
